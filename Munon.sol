@@ -1,16 +1,22 @@
-pragma solidity ^0.5.0;
+pragma solidity ^0.8.0;
 
-import "node_modules/openzeppelin-solidity/contracts/math/SafeMath.sol";
+import "hardhat/console.sol";
+
+import "contracts/SafeMath.sol";
 
 contract HackathonMunon
 {
+  // Enums
+  enum HackathonState { RegistrationOpen, ReviewEnabled, Finished }
+  
   // Events
   event HackathonCreation
   (
     address hackaton_host,
     uint256 hackathon_id,
-    string image_hash,
     string name,
+    string image_hash,
+    uint256 entry_fee,
     uint256 creation_time
   );
 
@@ -57,8 +63,9 @@ contract HackathonMunon
   {
     address host_addr;
     HackathonState state;
-    string image_hash;
     string name;
+    string image_hash;
+    uint256 entry_fee;
     uint256 pot;
     uint256 creation_time;
     uint256 enable_review_time;
@@ -70,12 +77,10 @@ contract HackathonMunon
     uint256 points;
   }
 
-  // Enums
-  enum HackathonState { RegistrationOpen, ReviewEnabled, Finished }
-
   // Public variables
   mapping(uint256 => Hackathon) public hackathons; // Stores hackathons data
   mapping(uint256 => mapping(address => Participant)) public hackathon_participants; // Stores participant data
+  mapping(uint256 => address[]) public hackathon_participant_addresses; // Stores participant addresses
   // Rating history, enables correcting ratings and prevents rating
   mapping(uint256 => mapping(address => mapping(address => uint256))) public participant_ratings;
   uint256 public hackathon_count; // Helps generating a new hackathon id
@@ -84,15 +89,15 @@ contract HackathonMunon
   uint256 entry_fee = 0.03 ether; // Hackathon entry fee
 
   // Modifiers
-  modifier paysEntryFee()
+  modifier paysEntryFee(uint256 hackathon_id)
   {
-    require(msg.value == entry_fee, "Amount not equal to pay fee");
+    require(msg.value == hackathons[hackathon_id].entry_fee, "Amount not equal to pay fee");
     _;
   }
 
   modifier hasNotJoined(uint256 hackathon_id)
   {
-    require(hackathon_participants[hackathon_id][msg.sender].addr == address(0), "Participant has joined");
+    require(hackathon_participants[hackathon_id][msg.sender].addr == address(0), "Participant has already joined");
     _;
   }
 
@@ -146,13 +151,13 @@ contract HackathonMunon
 
   modifier twoMonthFromCreation(uint256 hackathon_id)
   {
-    require(now >= hackathons[hackathon_id].creation_time + 60 days, "time must be greater than 2 months");
+    require(block.timestamp >= hackathons[hackathon_id].creation_time + 60 days, "time must be greater than 2 months");
     _;
   }
 
   modifier oneWeekFromReview(uint256 hackathon_id)
   {
-    require(now >= hackathons[hackathon_id].enable_review_time + 7 days, "time must be greater than 1 week");
+    require(block.timestamp >= hackathons[hackathon_id].enable_review_time + 7 days, "time must be greater than 1 week");
     _;
   }
 
@@ -163,21 +168,22 @@ contract HackathonMunon
   }
 
   // Public methods
-  function createHackathon(string memory image_hash, string memory _name) public
+  function createHackathon(string memory _name, string memory image_hash, uint256 _entry_fee) public
   {
     hackathon_count += 1;
-    uint256 date_now = now;
-    hackathons[hackathon_count] = Hackathon(msg.sender, HackathonState.RegistrationOpen, image_hash, _name, 0, date_now, date_now);
-    emit HackathonCreation(msg.sender, hackathon_count, image_hash,_name, date_now);
+    uint256 date_now = block.timestamp;
+    hackathons[hackathon_count] = Hackathon(msg.sender, HackathonState.RegistrationOpen, _name, image_hash, _entry_fee, 0, date_now, date_now);
+    emit HackathonCreation(msg.sender, hackathon_count, _name, image_hash, _entry_fee, date_now);
   }
 
   function join(
     uint256 hackathon_id
-  ) public payable paysEntryFee hasNotJoined(hackathon_id) isRegistrationOpen(hackathon_id)
+  ) public payable paysEntryFee(hackathon_id) hasNotJoined(hackathon_id) isRegistrationOpen(hackathon_id)
   {
     Participant memory participant = Participant(msg.sender, 0);
     hackathon_participants[hackathon_id][msg.sender] = participant;
-    hackathons[hackathon_id].pot = hackathons[hackathon_id].pot.add(entry_fee);
+    hackathon_participant_addresses[hackathon_id].push(msg.sender);
+    hackathons[hackathon_id].pot = hackathons[hackathon_id].pot.add(hackathons[hackathon_id].entry_fee);
     emit Registration(hackathon_id, msg.sender);
   }
 
@@ -213,7 +219,7 @@ contract HackathonMunon
     uint256 pot = hackathons[hackathon_id].pot;
     uint256 my_reward = pot.mul(my_points).div(total_points);
 
-    msg.sender.transfer(my_reward);
+    payable(msg.sender).transfer(my_reward);
     participant_has_cashed_out[hackathon_id][msg.sender] = true;
     emit CashOut(hackathon_id, msg.sender, my_reward);
   }
@@ -221,7 +227,7 @@ contract HackathonMunon
   function enableHackathonReview(uint256 hackathon_id) public isHackathonHost(hackathon_id)
   {
     hackathons[hackathon_id].state = HackathonState.ReviewEnabled;
-    hackathons[hackathon_id].enable_review_time = now;
+    hackathons[hackathon_id].enable_review_time = block.timestamp;
     emit HackathonReviewEnabled(hackathon_id);
   }
 
@@ -231,6 +237,7 @@ contract HackathonMunon
     emit HackathonFinished(hackathon_id);
   }
 
+  // Force methods
   function forceFinishHackathon(uint256 hackathon_id) public isRegistrationOpen(hackathon_id) twoMonthFromCreation(hackathon_id)
   {
     hackathons[hackathon_id].state = HackathonState.Finished;
@@ -243,7 +250,12 @@ contract HackathonMunon
     emit HackathonFinished(hackathon_id);
   }
 
-  function () external payable {
+  // View methods
+  function getParticipantCount(uint256 hackathon_id) public view returns(uint participant_count) {
+    return hackathon_participant_addresses[hackathon_id].length;
+  }
+
+  fallback () external payable {
     revert();
   }
 }
